@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en" style="--header-h: 76px;"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -2152,21 +2151,30 @@ window.KSA_BOOKING_MOCKUP = "data:image/webp;base64,UklGRvp6AABXRUJQVlA4IO56AACw
   // re-parsing already-formatted price strings out of the DOM.
   window.COUNTRY_DATA = COUNTRY_DATA;
 
-  // Country resolution — deliberately does NOT look at the visitor's own
-  // timezone/browser locale. A link should always open to the market it was
-  // prepared for, not wherever the person happens to be standing when they
-  // open it. Priority: 1) ?country= on the URL (how the link was sent —
-  // e.g. share a Bahrain-flavoured link with ?country=BH), 2) the last
-  // country this browser manually picked (so a BDM's own link keeps
-  // reopening on whatever they were last looking at), 3) UAE as the default
-  // for a fresh link/browser with neither signal.
+  // Country resolution. Priority: 1) ?country= on the URL (how the link
+  // was sent — e.g. share a Bahrain-flavoured link with ?country=BH) —
+  // always wins, so a link always opens to the market it was prepared
+  // for; 2) the last country this browser manually picked from the
+  // switcher (so a BDM's own link keeps reopening on whatever they were
+  // last looking at); 3) failing both of those — a fresh visit, no saved
+  // pick — a silent, best-effort IP lookup opens the deck to the
+  // visitor's own market when it's one of the seven this deck covers;
+  // 4) UAE as the last-resort default when there's no signal at all, the
+  // lookup fails or is blocked (e.g. no network — the file opened
+  // locally rather than hosted somewhere, or the request is blocked by
+  // the visitor's network), or it resolves to a market this deck doesn't
+  // cover.
   var COUNTRY_STORAGE_KEY = 'freshaDeckCountry';
 
   function saveCountryPreference(code){
     try{ localStorage.setItem(COUNTRY_STORAGE_KEY, code); } catch(e){}
   }
 
-  function getInitialCountry(){
+  // Just the two explicit signals — used both to pick the synchronous
+  // initial render (below) and to decide whether the IP lookup should
+  // even run. Doesn't fall back to 'AE' itself so callers can tell "no
+  // explicit signal" apart from "explicitly UAE".
+  function explicitCountryFromUrlOrStorage(){
     try{
       var params = new URLSearchParams(window.location.search);
       var fromUrl = (params.get('country') || '').toUpperCase();
@@ -2176,18 +2184,28 @@ window.KSA_BOOKING_MOCKUP = "data:image/webp;base64,UklGRvp6AABXRUJQVlA4IO56AACw
       var fromStorage = localStorage.getItem(COUNTRY_STORAGE_KEY);
       if(fromStorage && COUNTRY_DATA[fromStorage]) return fromStorage;
     } catch(e){}
-    return 'AE';
+    return null;
+  }
+
+  function getInitialCountry(){
+    return explicitCountryFromUrlOrStorage() || 'AE';
   }
 
   // Region switch UI wiring — the open/close disclosure is native <details>/<summary>
   // (works with zero JS); this only wires the actual country switch and auto-close
   // after a pick. Inline onclick on each button (see HTML) is a redundant fallback
   // in case this script hasn't finished initializing yet.
+  // Also doubles as the flag the IP lookup below checks before applying its
+  // result — if the visitor manually picks a market while that lookup is
+  // still in flight, their pick must win, not get overwritten a moment
+  // later when the lookup resolves.
+  var manualCountryPicked = false;
   var switchWrap = document.getElementById('regionSwitch');
   if(switchWrap){
     document.querySelectorAll('#regionSwitchMenu button[data-country]').forEach(function(btn){
       btn.addEventListener('click', function(){
         var picked = btn.getAttribute('data-country');
+        manualCountryPicked = true;
         render(picked);
         saveCountryPreference(picked);
         switchWrap.removeAttribute('open');
@@ -2199,6 +2217,30 @@ window.KSA_BOOKING_MOCKUP = "data:image/webp;base64,UklGRvp6AABXRUJQVlA4IO56AACw
   }
 
   render(getInitialCountry());
+
+  // Open to the visitor's own market on a fresh visit — no ?country= link,
+  // no previously saved manual pick. This is a live, per-visit lookup
+  // (deliberately never written to localStorage — a saved pick means
+  // "always reopen here", which this isn't) so someone traveling still
+  // sees their current country rather than a stale one from last time.
+  // get.geojs.io is used because it returns only a country code — no city,
+  // no coordinates — which is all this needs. Runs after the synchronous
+  // render above so the page is already fully interactive; if the lookup
+  // resolves to a supported market, render() is simply called again with
+  // it. Fails silently (no network, blocked, slow, unsupported country)
+  // straight back to the UAE default already on screen.
+  if(!explicitCountryFromUrlOrStorage()){
+    fetch('https://get.geojs.io/v1/ip/country.json', { cache: 'no-store' })
+      .then(function(res){ return res.ok ? res.json() : null; })
+      .then(function(data){
+        if(!data || manualCountryPicked) return;
+        var detected = (data.country || '').toUpperCase();
+        if(detected && COUNTRY_DATA[detected] && detected !== window.CURRENT_COUNTRY){
+          render(detected);
+        }
+      })
+      .catch(function(){ /* offline, blocked, or the service is down — keep the UAE default */ });
+  }
 
   // Optional per-BDM contact override: append ?bdm=name@fresha.com to the shared
   // deck link and the "Get in touch" email swaps in automatically — one link for
@@ -3907,7 +3949,14 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
             if (i > 0) pdf.addPage([PAGE_W, pageHCssActual], pageOrientation(pageHCssActual));
             pdf.addImage(imgData, 'JPEG', 0, 0, PAGE_W, pageHCssActual);
           }
-          pdf.save('Fresha UAE - Growth Engine.pdf');
+          // Filename reflects whichever market is currently open (not
+          // hardcoded to one country — this deck covers seven), so a BDM
+          // downloading decks for several markets ends up with distinct,
+          // correctly-labelled files instead of the same generic name
+          // overwriting itself each time.
+          var pdfCountryData = COUNTRY_DATA[window.CURRENT_COUNTRY];
+          var pdfShortName = pdfCountryData ? pdfCountryData.shortName : window.CURRENT_COUNTRY;
+          pdf.save('Fresha ' + pdfShortName + ' - Growth Engine.pdf');
         })
         .catch(function(err){
           console.error('PDF export failed:', err);
